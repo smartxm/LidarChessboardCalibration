@@ -1,5 +1,6 @@
 import open3d as o3d
 import numpy as np
+from lidar_gui_calibrator import LidarGuiCalibrator
 
 def load_csv_to_pointcloud(csv_path):
     """
@@ -183,7 +184,7 @@ def get_plane_view(sub_pcd):
 
 print("Load a csv point cloud, print it, and render it")
 print("Testing IO for point cloud ...")
-pcd = load_csv_to_pointcloud("input/3.csv")
+pcd = load_csv_to_pointcloud("../input/3.csv")
 print(pcd)
 print(np.asarray(pcd.points))
 
@@ -200,10 +201,21 @@ sub_pcd = pick_points(geometries,cam_params)
 # ===== 渲染 =====
 center, front, up = get_plane_view(sub_pcd)
 
-o3d.visualization.draw_geometries(
-    [sub_pcd],
-    zoom=0.5,
-    front=front,
-    lookat=center,
-    up=up
-)
+calib = LidarGuiCalibrator(sub_pcd,[center,front,up])
+
+# ⭐ 必须先投影
+calib.prepare_data()
+
+# （可选）如果你还想先看一眼投影效果
+center, front, up = get_plane_view(calib.pcd)
+
+# o3d.visualization.draw_geometries(
+#     [calib.pcd],
+#     zoom=0.5,
+#     front=front,
+#     lookat=center,
+#     up=up
+# )
+
+# ⭐ 进入GUI（内部不会再重复投影）
+calib.run()
