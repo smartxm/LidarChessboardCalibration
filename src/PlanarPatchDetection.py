@@ -152,39 +152,51 @@ def pick_points(geometries,cam_params):
 
     sub_pcd = pcd.crop(selected_obox)
 
-    return sub_pcd
+    return sub_pcd, selected_obox
 
 def get_plane_view(sub_pcd):
     """展平子点云，使其平行于电脑屏幕展示，获取需要的初始相机位置参数"""
     # 用 PCA 拟合平面法向量
+    # 把 Open3D.PointCloud 转成 N×3 的矩阵
     points = np.asarray(sub_pcd.points)
 
+    # 计算质心
+    # numpy.mean()函数用于计算数组元素的算术平均值，axis=0:对每一列求平均（即对points(是array)中所有点的x,y,z分别求平均）
     center = points.mean(axis=0)
+
     cov = np.cov(points.T)
     eigvals, eigvecs = np.linalg.eig(cov)
 
-    # 最小特征值对应的特征向量 = 法向量
+    # 最小特征值对应的特征向量 = 法向量具体看不太懂怎么算出来的，总之一顿对协方差矩阵做特征值分解，然后是这一行的提取法向量
     normal = eigvecs[:, np.argmin(eigvals)]
 
     # 统一方向（让它朝向相机）
     # 让法向量朝向原点（或你想看的方向）
     view_point = np.array([0, 0, 0])  # 你希望“正面”朝向的点
 
+    # 用 点积（dot product） 判断方向，该值小于0时法向量背对相机
     if np.dot(normal, view_point - center) < 0:
         normal = -normal
 
-    front = normal.tolist()
+    # 计算一个合理的相机位置（eye）
+    bbox = sub_pcd.get_axis_aligned_bounding_box()
+    extent = np.linalg.norm(bbox.get_extent())
 
-    # 构造一个合理的 up 向量（避免和 normal 平行）
-    up = [0, 0, 1]
-    if abs(np.dot(up, front)) > 0.9:
-        up = [0, 1, 0]
+    distance = extent * 2.0   #  可以调：1.5 ~ 3.0
 
-    return center.tolist(), front, up
+    eye = center + normal * distance
+
+    # up 向量 
+    up = np.array([0, 0, 1])
+
+    if abs(np.dot(up, normal)) > 0.9:
+        up = np.array([0, 1, 0])
+
+    return center.tolist(), eye.tolist(), up.tolist()
 
 print("Load a csv point cloud, print it, and render it")
 print("Testing IO for point cloud ...")
-pcd = load_csv_to_pointcloud("../input/3.csv")
+pcd = load_csv_to_pointcloud("../input/1.csv")
 print(pcd)
 print(np.asarray(pcd.points))
 
@@ -196,26 +208,13 @@ geometries = visualize_planes(pcd,planes)
 cam_params = adjust_perspective(geometries)
 
 # ================= 第二阶段：选点 =================
-sub_pcd = pick_points(geometries,cam_params)
+sub_pcd,plane = pick_points(geometries,cam_params)
 
 # ===== 渲染 =====
-center, front, up = get_plane_view(sub_pcd)
+center, eye, up = get_plane_view(sub_pcd)
 
-calib = LidarGuiCalibrator(sub_pcd,[center,front,up])
-
-# ⭐ 必须先投影
-calib.prepare_data()
-
-# （可选）如果你还想先看一眼投影效果
-center, front, up = get_plane_view(calib.pcd)
-
-# o3d.visualization.draw_geometries(
-#     [calib.pcd],
-#     zoom=0.5,
-#     front=front,
-#     lookat=center,
-#     up=up
-# )
+print(center,eye,up)
+calib = LidarGuiCalibrator(sub_pcd,plane,(center,eye,up))
 
 # ⭐ 进入GUI（内部不会再重复投影）
 calib.run()
