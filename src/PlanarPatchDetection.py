@@ -196,7 +196,7 @@ def get_plane_view(sub_pcd):
 
 print("Load a csv point cloud, print it, and render it")
 print("Testing IO for point cloud ...")
-pcd = load_csv_to_pointcloud("../input/1.csv")
+pcd = load_csv_to_pointcloud("../input/3.csv")
 print(pcd)
 print(np.asarray(pcd.points))
 
