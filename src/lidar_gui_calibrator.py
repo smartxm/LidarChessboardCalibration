@@ -106,19 +106,20 @@ class LidarGuiCalibrator:
         mat_line.line_width = 1.0
 
         scene.set_on_mouse(self.on_mouse)
-        
+        scene.set_on_key(self.on_key)
 
         return window, scene
     
 
     def pick_point(self, x, y):
         """
-        屏幕点击 → 射线打平面 → 找最近点
-        返回吸附到投影点云的最近点（世界坐标）
+        把在屏幕上点的一个像素(x,y)，转换成三维空间中的一个点
         """
-        # 获取当前相机参数（从相机矩阵反推，而不是用初始化保存的参数）
+        # 获取当前相机参数（从相机矩阵反推，而不是用初始化保存的参数，事实证明这样更稳定）
         camera = self.scene.scene.camera
+        # 视图矩阵：把“世界坐标”变成“相机坐标”（作用：不动相机，而是把整个世界“变换”到相机前面）内部包含：1.相机位置（在哪） 2. 相机朝向（看哪）
         view_matrix = camera.get_view_matrix()
+        # 投影矩阵：把3D点投影到2D屏幕  内部包含：1.视场角（FOV）2.宽高比（aspect）3.近裁剪面 / 远裁剪面
         proj_matrix = camera.get_projection_matrix()
         
         # 从视图矩阵获取相机位置（视图矩阵的逆的平移部分）
@@ -128,40 +129,52 @@ class LidarGuiCalibrator:
         # 获取视图矩阵的逆，从中提取相机位置和方向
         view_inv = np.linalg.inv(view_matrix_np)
         eye = view_inv[:3, 3]  # 相机位置
-        forward = -view_inv[:3, 2]  # 相机朝向（OpenGL 约定是 -Z）
+        """
+        一个标准的4*4变换矩阵
+        | R11 R12 R13 Tx |
+        | R21 R22 R23 Ty |
+        | R31 R32 R33 Tz |
+        |  0   0   0  1  |
+        这里取的是[Tx, Ty, Tz],即相机在世界坐标中的位置(x, y, z)"""
+        forward = -view_inv[:3, 2]  # 相机朝向（OpenGL 约定相机的朝向是 -Z（z粥负方向））
         forward /= np.linalg.norm(forward)
         
         up = view_inv[:3, 1]  # 相机的上方向
         up /= np.linalg.norm(up)
         
         # 相机坐标系
+        # 叉乘建立一个一个同时垂直于 forward 和 up 的向量
         right = np.cross(forward, up)
         right /= np.linalg.norm(right)
         
         true_up = np.cross(right, forward)
         true_up /= np.linalg.norm(true_up)
 
-        # 2️⃣ 屏幕坐标转 NDC
+        # 屏幕坐标转 NDC
         w = self.scene.frame.width
         h = self.scene.frame.height
+        # 把屏幕坐标变成：[-1, 1] 范围
         nx = (x / w - 0.5) * 2      # [-1,1]
-        ny = (0.5 - y / h) * 2      # [-1,1], 上为正
+        ny = (0.5 - y / h) * 2      # [-1,1], 上为正    屏幕 y：向下是正 数学坐标：向上是正
 
-        # 3️⃣ 从投影矩阵获取 FOV 和 aspect
-        # 投影矩阵中可以提取出 FOV 信息
+        # 从投影矩阵获取 FOV 和 aspect
+        # 投影矩阵中可以提取出 FOV 信息（从投影矩阵“反推出”视场角）
         # proj_matrix[0,0] = cot(fov_x/2) / aspect, proj_matrix[1,1] = cot(fov_y/2)
         fovy = 2.0 * np.arctan(1.0 / proj_matrix_np[1, 1])
         aspect = w / h
         
+        # 把屏幕坐标映射到“相机空间”
         px = nx * np.tan(fovy / 2) * aspect
         py = ny * np.tan(fovy / 2)
 
         # 射线方向（相机空间 → 世界空间）
+        # 射线 = 朝前 + 横向偏移 + 竖向偏移
         ray_dir = forward + px * right + py * true_up
         ray_dir /= np.linalg.norm(ray_dir)
+        # 射线起点从相机发射
         ray_origin = eye
 
-        # 4️⃣ 与平面求交
+        # 射线和平面求交
         plane_center = self.plane.center
         normal = self.plane.R[:, 2]
 
@@ -172,14 +185,9 @@ class LidarGuiCalibrator:
         t = np.dot(plane_center - ray_origin, normal) / denom
         if t < 0:
             return None  # 射线指向平面背面
-
+        
+        # 返回射线与平面的交点
         hit = ray_origin + t * ray_dir
-
-        # 5️⃣ 吸附到最近点（投影后的点云）
-        pts = np.asarray(self.pcd.points)
-        idx = np.argmin(np.linalg.norm(pts - hit, axis=1))
-        nearest = pts[idx]
-
         return hit
 
     def on_mouse(self, event):
@@ -256,6 +264,7 @@ class LidarGuiCalibrator:
         self.scene.scene.add_geometry(name, sphere, mat)    
 
     def get_camera_ray(self, x, y):
+        """与pick_point函数算法基本相同，获取相机参数，方便后续调用，负责从相机发射射线"""
         camera = self.scene.scene.camera
         view_matrix = np.array(camera.get_view_matrix())
         proj_matrix = np.array(camera.get_projection_matrix())
@@ -436,8 +445,66 @@ class LidarGuiCalibrator:
         mat.shader = "unlitLine"
         mat.line_width = 2.0
 
-        self.scene.scene.remove_geometry("grid")
+        # 删除旧 grid（安全版）
+        if self.scene.scene.has_geometry("grid"):
+            self.scene.scene.remove_geometry("grid")
+
+        # 添加新 grid
         self.scene.scene.add_geometry("grid", line_set, mat)
+
+        # 保存线的信息
+        self.x_lines = x_lines
+        self.y_lines = y_lines
+        self.grid_origin = p0
+        self.grid_x_axis = x_axis
+        self.grid_y_axis = y_axis
+
+    def on_key(self, event):
+        if event.type == gui.KeyEvent.Type.DOWN:
+
+            # S 导出（Open3D KeyEvent 无 is_ctrl_down
+            # 具体 modifier 支持依赖 Open3D 版本，此处先保持兼容）
+            if event.key == gui.KeyName.S:
+
+                print("⌨️ S detected → 导出网格点")
+
+                import time
+                filename = f"../output/lidar_corner_{int(time.time())}.csv"
+
+                self.export_grid_intersections(filename)
+
+                return gui.Widget.EventCallbackResult.HANDLED
+
+        return gui.Widget.EventCallbackResult.IGNORED
+
+    def export_grid_intersections(self, filename="grid_points.csv"):
+        if not hasattr(self, "x_lines"):
+            print("❌ 网格还没生成")
+            return
+
+        points = []
+
+        p0 = self.grid_origin
+        x_axis = self.grid_x_axis
+        y_axis = self.grid_y_axis
+
+        normal = self.plane.R[:, 2]
+
+        for x in self.x_lines:
+            for y in self.y_lines:
+                pt = p0 + x * x_axis + y * y_axis
+                pt = pt + self.offset * normal
+                points.append(pt)
+
+        points = np.array(points)
+
+        import csv
+        with open(filename, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["x", "y", "z"])
+            writer.writerows(points)
+
+        print(f"✅ 已导出 {len(points)} 个点到 {filename}")
 
     # ================= 主入口 =================
     def run(self):
