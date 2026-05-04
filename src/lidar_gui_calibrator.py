@@ -18,6 +18,12 @@ class LidarGuiCalibrator:
 
         self.corner_points = []   # 存4个角点（世界坐标）
         self.pick_mode = True     # 是否在选点模式
+        self.corner_sphere_radius = 0.01
+        self.selected_corner_idx = None
+        self.dragging_corner = False
+
+        self.mouse_origin = None
+        self.corner_origin = None
         """
         plane.center   # 平面中心
         plane.R        # 3x3 旋转矩阵
@@ -177,41 +183,185 @@ class LidarGuiCalibrator:
         return hit
 
     def on_mouse(self, event):
-        if not self.pick_mode:
-            return gui.Widget.EventCallbackResult.IGNORED
+        if self.pick_mode:
+            if (event.type == gui.MouseEvent.Type.BUTTON_DOWN and
+                (event.buttons & int(gui.MouseButton.LEFT)) and
+                event.is_modifier_down(gui.KeyModifier.SHIFT)):
 
-        if (event.type == gui.MouseEvent.Type.BUTTON_UP and
-            event.is_modifier_down(gui.KeyModifier.SHIFT)):
+                x, y = event.x, event.y
+                world = self.pick_point(x, y)
 
-            x, y = event.x, event.y
-            world = self.pick_point(x, y)
+                if world is None:
+                    print("没点到有效位置")
+                    return gui.Widget.EventCallbackResult.HANDLED
 
-            if world is None:
-                print("没点到有效位置")
+                print("选中点:", world)
+                self.corner_points.append(np.array(world))
+                self.add_pick_point(world)
+
+                if len(self.corner_points) == 4:
+                    print("4个点选完，生成网格")
+                    self.pick_mode = False
+                    self.update_corner_spheres()
+                    self.update_grid_by_corners()
+
                 return gui.Widget.EventCallbackResult.HANDLED
 
-            print("选中点:", world)
-            self.corner_points.append(np.array(world))
-            self.add_pick_point(world)
+            return gui.Widget.EventCallbackResult.IGNORED
 
-            if len(self.corner_points) == 4:
-                print("4个点选完，生成网格")
-                self.pick_mode = False
-                self.update_grid_by_corners()
+        # 拖动已经选好的 4 个角点
+        if event.type == gui.MouseEvent.Type.BUTTON_DOWN and (event.buttons & int(gui.MouseButton.LEFT)):
+            ray_origin, ray_dir = self.get_camera_ray(event.x, event.y)
+            idx = self.detect_corner_hit(ray_origin, ray_dir)
+            if idx is not None:
+                self.selected_corner_idx = idx
+                self.dragging_corner = True
+                self.mouse_origin = np.array([event.x, event.y])
+                self.corner_origin = self.corner_points[idx].copy()
+                self.update_corner_spheres()
+                return gui.Widget.EventCallbackResult.CONSUMED
+            return gui.Widget.EventCallbackResult.IGNORED
 
-        return gui.Widget.EventCallbackResult.HANDLED
+        if event.type == gui.MouseEvent.Type.DRAG and self.dragging_corner and self.selected_corner_idx is not None:
+            if self.mouse_origin is not None and self.corner_origin is not None:
+                displacement = self.move_corner(self.mouse_origin, np.array([event.x, event.y]))
+                if displacement is not None:
+                    self.corner_points[self.selected_corner_idx] = self.corner_origin + displacement
+                    self.update_corner_spheres()
+                    self.update_grid_by_corners()
+            return gui.Widget.EventCallbackResult.CONSUMED
+
+        if (event.type == gui.MouseEvent.Type.BUTTON_UP and
+            (event.buttons & int(gui.MouseButton.LEFT)) and
+            self.dragging_corner):
+            self.dragging_corner = False
+            self.selected_corner_idx = None
+            self.mouse_origin = None
+            self.corner_origin = None
+            self.update_corner_spheres()
+            return gui.Widget.EventCallbackResult.CONSUMED
+
+        return gui.Widget.EventCallbackResult.IGNORED
     
     def add_pick_point(self, pos):
-        sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.01)
+        sphere = o3d.geometry.TriangleMesh.create_sphere(radius=self.corner_sphere_radius)
         sphere.translate(pos)
         sphere.paint_uniform_color([0, 0, 1])
 
-        name = f"pick_{len(self.corner_points)}"
+        name = f"corner_{len(self.corner_points) - 1}"
 
         mat = rendering.MaterialRecord()
         mat.shader = "defaultUnlit"
 
         self.scene.scene.add_geometry(name, sphere, mat)    
+
+    def get_camera_ray(self, x, y):
+        camera = self.scene.scene.camera
+        view_matrix = np.array(camera.get_view_matrix())
+        proj_matrix = np.array(camera.get_projection_matrix())
+
+        inv_view = np.linalg.inv(view_matrix)
+        eye = inv_view[:3, 3]
+
+        forward = -inv_view[:3, 2]
+        forward /= np.linalg.norm(forward)
+
+        up = inv_view[:3, 1]
+        up /= np.linalg.norm(up)
+
+        right = np.cross(forward, up)
+        right /= np.linalg.norm(right)
+
+        true_up = np.cross(right, forward)
+        true_up /= np.linalg.norm(true_up)
+
+        w = self.scene.frame.width
+        h = self.scene.frame.height
+        nx = (x / w - 0.5) * 2
+        ny = (0.5 - y / h) * 2
+
+        fovy = 2.0 * np.arctan(1.0 / proj_matrix[1, 1])
+        aspect = w / h
+
+        px = nx * np.tan(fovy / 2) * aspect
+        py = ny * np.tan(fovy / 2)
+
+        ray_dir = forward + px * right + py * true_up
+        ray_dir /= np.linalg.norm(ray_dir)
+
+        return eye, ray_dir
+
+    def intersect_ray_plane(self, origin, direction, plane_point, normal):
+        denom = np.dot(direction, normal)
+        if abs(denom) < 1e-6:
+            return None
+
+        t = np.dot(plane_point - origin, normal) / denom
+        if t < 0:
+            return None
+
+        return origin + t * direction
+
+    def ray_sphere_intersection(self, origin, direction, center, radius):
+        oc = origin - center
+        a = np.dot(direction, direction)
+        b = 2.0 * np.dot(direction, oc)
+        c = np.dot(oc, oc) - radius * radius
+
+        delta = b * b - 4.0 * a * c
+        if delta < 0:
+            return False, None
+
+        t1 = (-b - np.sqrt(delta)) / (2.0 * a)
+        t2 = (-b + np.sqrt(delta)) / (2.0 * a)
+        if t1 >= 0:
+            return True, t1
+        if t2 >= 0:
+            return True, t2
+        return False, None
+
+    def detect_corner_hit(self, origin, direction):
+        hit_idx = None
+        min_t = float('inf')
+        for i, pos in enumerate(self.corner_points):
+            hit, t = self.ray_sphere_intersection(origin, direction, pos, self.corner_sphere_radius)
+            if hit and t is not None and t < min_t:
+                min_t = t
+                hit_idx = i
+        return hit_idx
+
+    def move_corner(self, mouse_origin, mouse_current):
+        ray_origin, ray_dir_origin = self.get_camera_ray(mouse_origin[0], mouse_origin[1])
+        _, ray_dir_current = self.get_camera_ray(mouse_current[0], mouse_current[1])
+
+        plane_point = self.plane.center
+        normal = self.plane.R[:, 2]
+
+        start_hit = self.intersect_ray_plane(ray_origin, ray_dir_origin, plane_point, normal)
+        current_hit = self.intersect_ray_plane(ray_origin, ray_dir_current, plane_point, normal)
+        if start_hit is None or current_hit is None:
+            return None
+
+        return current_hit - start_hit
+
+    def update_corner_spheres(self):
+        for i, pos in enumerate(self.corner_points):
+            name = f"corner_{i}"
+            self.scene.scene.remove_geometry(name)
+
+            sphere = o3d.geometry.TriangleMesh.create_sphere(radius=self.corner_sphere_radius)
+            sphere.translate(pos)
+
+            if i == self.selected_corner_idx and self.dragging_corner:
+                sphere.paint_uniform_color([0, 1, 0])
+            elif i == self.selected_corner_idx:
+                sphere.paint_uniform_color([1, 1, 0])
+            else:
+                sphere.paint_uniform_color([0, 0, 1])
+
+            mat = rendering.MaterialRecord()
+            mat.shader = "defaultUnlit"
+            self.scene.scene.add_geometry(name, sphere, mat)
 
     def update_grid_by_corners(self):
         p0, p1, p2, p3 = self.corner_points
@@ -233,7 +383,7 @@ class LidarGuiCalibrator:
         ymin, ymax = -margin * y_len, (1 + margin) * y_len
 
         # 计算竖线和横线
-        # 10x7 角点对应 9 条竖线和 6 条横线
+        # 10x7 角点对应 9 条竖线和 6 条横线（内部线）
         x_lines = np.linspace(0, x_len, 9)  # 9 条竖线
         y_lines = np.linspace(0, y_len, 6)   # 6 条横线
 
@@ -241,9 +391,9 @@ class LidarGuiCalibrator:
         lines = []
         colors = []
 
-        # 法向
+        # 法向：使用当前相机方向判断符号
         normal = self.plane.R[:, 2]
-        eye = np.asarray(self.cam_parmams[1])
+        eye, _ = self.get_camera_ray(self.scene.frame.width * 0.5, self.scene.frame.height * 0.5)
         view_dir = eye - self.plane.center
         view_dir /= np.linalg.norm(view_dir)
 
@@ -288,10 +438,6 @@ class LidarGuiCalibrator:
 
         self.scene.scene.remove_geometry("grid")
         self.scene.scene.add_geometry("grid", line_set, mat)
-
-        # 删除选点
-        for i in range(1, 5):
-            self.scene.scene.remove_geometry(f"pick_{i}") 
 
     # ================= 主入口 =================
     def run(self):
