@@ -94,43 +94,23 @@ class LidarGuiCalibrator:
         # 设置点的大小
         mat.point_size = 5.0
         scene.scene.add_geometry("pcd", self.pcd, mat)
-        # self.add_center_marker()
-        # ===== 添加网格 =====
-        grid, grid_points = self.create_grid_lines()
-        self.grid_points = grid_points
 
         mat_line = rendering.MaterialRecord()
         mat_line.shader = "unlitLine"
         mat_line.line_width = 1.0
 
-        scene.scene.add_geometry("grid", grid, mat_line)
-
         scene.set_on_mouse(self.on_mouse)
         
 
         return window, scene
-
-    # def add_center_marker(self):
-    #     center = np.asarray(self.plane.center)
-
-    #     # 创建一个球（比选点稍微大一点）
-    #     sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.01)
-    #     sphere.translate(center)
-
-    #     # 红色
-    #     sphere.paint_uniform_color([1, 0, 0])
-
-    #     mat = rendering.MaterialRecord()
-    #     mat.shader = "defaultUnlit"
-
-    #     self.scene.scene.add_geometry("center_marker", sphere, mat)
+    
 
     def pick_point(self, x, y):
         """
         屏幕点击 → 射线打平面 → 找最近点
         返回吸附到投影点云的最近点（世界坐标）
         """
-        # 1️⃣ 获取当前相机参数（从相机矩阵反推，而不是用初始化保存的参数）
+        # 获取当前相机参数（从相机矩阵反推，而不是用初始化保存的参数）
         camera = self.scene.scene.camera
         view_matrix = camera.get_view_matrix()
         proj_matrix = camera.get_projection_matrix()
@@ -236,7 +216,7 @@ class LidarGuiCalibrator:
     def update_grid_by_corners(self):
         p0, p1, p2, p3 = self.corner_points
 
-        # ===== 1️⃣ 建立局部坐标系 =====
+        # 建立局部坐标系
         x_dir = p1 - p0
         y_dir = p2 - p0
 
@@ -246,13 +226,13 @@ class LidarGuiCalibrator:
         x_axis = x_dir / x_len
         y_axis = y_dir / y_len
 
-        # ===== 2️⃣ 定义局部范围（允许稍微超出一点）=====
-        margin = 0.3   # 控制超出比例（10%）
+        # 定义局部超出范围，方便后续生成拖拽点不遮挡现有棋盘格
+        margin = 0.3
 
         xmin, xmax = -margin * x_len, (1 + margin) * x_len
         ymin, ymax = -margin * y_len, (1 + margin) * y_len
 
-        # ===== 3️⃣ 对应 10x7 角点棋盘格 =====
+        # 计算竖线和横线
         # 10x7 角点对应 9 条竖线和 6 条横线
         x_lines = np.linspace(0, x_len, 9)  # 9 条竖线
         y_lines = np.linspace(0, y_len, 6)   # 6 条横线
@@ -261,7 +241,7 @@ class LidarGuiCalibrator:
         lines = []
         colors = []
 
-        # ===== 法向（保持你原逻辑）=====
+        # 法向
         normal = self.plane.R[:, 2]
         eye = np.asarray(self.cam_parmams[1])
         view_dir = eye - self.plane.center
@@ -274,7 +254,7 @@ class LidarGuiCalibrator:
             base = p0 + x * x_axis + y * y_axis
             return base + self.offset * normal
 
-        # ===== 4️⃣ 竖线（允许延伸）=====
+        # 竖线添加到场景
         for x in x_lines:
             p1_ = to_world(x, ymin)
             p2_ = to_world(x, ymax)
@@ -285,7 +265,7 @@ class LidarGuiCalibrator:
             lines.append([idx, idx + 1])
             colors.append([1, 0, 0])
 
-        # ===== 5️⃣ 横线 =====
+        # 横线添加到场景
         for y in y_lines:
             p1_ = to_world(xmin, y)
             p2_ = to_world(xmax, y)
@@ -296,7 +276,7 @@ class LidarGuiCalibrator:
             lines.append([idx, idx + 1])
             colors.append([1, 0, 0])
 
-        # ===== 6️⃣ 更新 =====
+        # 更新
         line_set = o3d.geometry.LineSet()
         line_set.points = o3d.utility.Vector3dVector(points_3d)
         line_set.lines = o3d.utility.Vector2iVector(lines)
@@ -312,89 +292,6 @@ class LidarGuiCalibrator:
         # 删除选点
         for i in range(1, 5):
             self.scene.scene.remove_geometry(f"pick_{i}") 
-
-    def create_grid_lines(self):
-        """在平面上生成10x7网格线"""
-
-        R = self.plane.R
-        center = self.plane.center
-
-        x_axis = R[:, 0]
-        y_axis = R[:, 1]
-
-        # 转换到平面局部坐标
-        points = np.asarray(self.pcd.points)
-        local_pts = []
-
-        for p in points:
-            v = p - center
-            x = np.dot(v, x_axis)
-            y = np.dot(v, y_axis)
-            local_pts.append([x, y])
-
-        local_pts = np.array(local_pts)
-
-        xmin, ymin = local_pts.min(axis=0)
-        xmax, ymax = local_pts.max(axis=0)
-        # xmin = xmin*0.9
-        # ymin = ymin*0.9
-        # xmax = xmax*0.9
-        # ymax = ymax*0.9
-        # 生成分割线
-        x_lines = np.linspace(xmin, xmax, 11)[1:-1]  # 9条竖线
-        y_lines = np.linspace(ymin, ymax, 8)[1:-1]   # 6条横线
-
-        # 构建线
-        points_3d = []
-        lines = []
-        colors = []
-
-        # 法向量修正
-        normal = self.plane.R[:, 2]
-        # 计算从平面指向相机的方向
-        plane_center = self.plane.center
-        eye = np.asarray(self.cam_parmams[1])
-        view_dir = eye - plane_center
-        view_dir = view_dir / np.linalg.norm(view_dir)
-        # 点积判断方向
-        if np.dot(normal, view_dir) < 0:
-            normal = -normal
-
-        def to_world(x, y):
-            base = center + x * x_axis + y * y_axis
-            return base + self.offset * normal
-
-        # 竖线
-        for x in x_lines:
-            p1 = to_world(x, ymin)
-            p2 = to_world(x, ymax)
-
-            idx = len(points_3d)
-            points_3d.append(p1)
-            points_3d.append(p2)
-
-            lines.append([idx, idx + 1])
-            colors.append([1, 0, 0])
-
-        # 横线
-        for y in y_lines:
-            p1 = to_world(xmin, y)
-            p2 = to_world(xmax, y)
-
-            idx = len(points_3d)
-            points_3d.append(p1)
-            points_3d.append(p2)
-
-            lines.append([idx, idx + 1])
-            colors.append([1, 0, 0])
-
-        # 创建 LineSet
-        line_set = o3d.geometry.LineSet()
-        line_set.points = o3d.utility.Vector3dVector(points_3d)
-        line_set.lines = o3d.utility.Vector2iVector(lines)
-        line_set.colors = o3d.utility.Vector3dVector(colors)
-
-        return line_set, points_3d
 
     # ================= 主入口 =================
     def run(self):
