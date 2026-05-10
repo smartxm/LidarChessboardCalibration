@@ -2,6 +2,8 @@ import open3d as o3d
 import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
 import numpy as np
+import csv
+from datetime import datetime
 
 
 class LidarGuiCalibrator:
@@ -105,6 +107,7 @@ class LidarGuiCalibrator:
         mat_line.shader = "unlitLine"
         mat_line.line_width = 1.0
 
+        # 监听鼠标操作和键盘操作
         scene.set_on_mouse(self.on_mouse)
         scene.set_on_key(self.on_key)
 
@@ -191,7 +194,10 @@ class LidarGuiCalibrator:
         return hit
 
     def on_mouse(self, event):
+        """统一管理所有的鼠标操作与更新调用"""
+        # 如果在选点模式，则监听
         if self.pick_mode:
+            # 按下了 Shift + 鼠标左键
             if (event.type == gui.MouseEvent.Type.BUTTON_DOWN and
                 (event.buttons & int(gui.MouseButton.LEFT)) and
                 event.is_modifier_down(gui.KeyModifier.SHIFT)):
@@ -213,32 +219,41 @@ class LidarGuiCalibrator:
                     self.update_corner_spheres()
                     self.update_grid_by_corners()
 
+                # 这一行的作用是告诉open3d 这个事件我已经处理完了
                 return gui.Widget.EventCallbackResult.HANDLED
-
+            # 这一行的作用是告诉open3d 这个事件我没有处理
             return gui.Widget.EventCallbackResult.IGNORED
 
-        # 拖动已经选好的 4 个角点
+        # 拖拽模式：拖动已经选好的 4 个角点
         if event.type == gui.MouseEvent.Type.BUTTON_DOWN and (event.buttons & int(gui.MouseButton.LEFT)):
+            # 检测点击了哪个角点
             ray_origin, ray_dir = self.get_camera_ray(event.x, event.y)
             idx = self.detect_corner_hit(ray_origin, ray_dir)
+            # 检测到鼠标按住的点
             if idx is not None:
                 self.selected_corner_idx = idx
-                self.dragging_corner = True
+                self.dragging_corner = True         # 当前正在拖拽某个角点
+                # 记录拖拽起点
                 self.mouse_origin = np.array([event.x, event.y])
                 self.corner_origin = self.corner_points[idx].copy()
                 self.update_corner_spheres()
                 return gui.Widget.EventCallbackResult.CONSUMED
             return gui.Widget.EventCallbackResult.IGNORED
 
+        # 执行拖动
         if event.type == gui.MouseEvent.Type.DRAG and self.dragging_corner and self.selected_corner_idx is not None:
             if self.mouse_origin is not None and self.corner_origin is not None:
+                # 计算位移
                 displacement = self.move_corner(self.mouse_origin, np.array([event.x, event.y]))
                 if displacement is not None:
+                    # 更新角点位置
                     self.corner_points[self.selected_corner_idx] = self.corner_origin + displacement
+                    # 刷新显示
                     self.update_corner_spheres()
                     self.update_grid_by_corners()
             return gui.Widget.EventCallbackResult.CONSUMED
 
+        # 鼠标松开，结束拖拽状态，清空状态
         if (event.type == gui.MouseEvent.Type.BUTTON_UP and
             (event.buttons & int(gui.MouseButton.LEFT)) and
             self.dragging_corner):
@@ -252,15 +267,21 @@ class LidarGuiCalibrator:
         return gui.Widget.EventCallbackResult.IGNORED
     
     def add_pick_point(self, pos):
+        """在你点击的位置创建一个蓝色小球"""
         sphere = o3d.geometry.TriangleMesh.create_sphere(radius=self.corner_sphere_radius)
+        # 将创建出来的球移动到目标位置（新建出来的球默认默认位置在0,0,0）
         sphere.translate(pos)
+        # 设置球体颜色
         sphere.paint_uniform_color([0, 0, 1])
 
         name = f"corner_{len(self.corner_points) - 1}"
 
+        # 创建材质
         mat = rendering.MaterialRecord()
+        # 设置 Shader，GPU渲染方式，不受光照影响
         mat.shader = "defaultUnlit"
 
+        # 添加到场景（最终显示在gui图形界面）
         self.scene.scene.add_geometry(name, sphere, mat)    
 
     def get_camera_ray(self, x, y):
@@ -301,10 +322,18 @@ class LidarGuiCalibrator:
         return eye, ray_dir
 
     def intersect_ray_plane(self, origin, direction, plane_point, normal):
+        """计算一条射线和一个平面的交点，返回交点  
+        origin：射线起点；  
+        direction：射线方向；  
+        plane_point：平面上的任意一个点；  
+        normal：平面法向量"""
+        # 先将射线方向向量和法向量点成，如果点乘为0则二者垂直，无法求出交点
         denom = np.dot(direction, normal)
+        # 浮点数计算不精确，不能直接判断==0
         if abs(denom) < 1e-6:
             return None
 
+        # 射线和平面求交公式
         t = np.dot(plane_point - origin, normal) / denom
         if t < 0:
             return None
@@ -312,7 +341,14 @@ class LidarGuiCalibrator:
         return origin + t * direction
 
     def ray_sphere_intersection(self, origin, direction, center, radius):
+        """射线检测，判断鼠标射线有没有打中角点小球  
+        center：球心位置"""
         oc = origin - center
+        # 联立射线方程和球面方程 
+        # P(t) = origin + t * direction
+        # ||P - center||^2 = r^2
+        # 化简得(oc + t * direction) ⋅ (oc + t * direction) = r^2
+        # 展开，移项t^2(direction⋅direction)+2t(direction⋅oc)+(oc⋅oc−r^2)=0
         a = np.dot(direction, direction)
         b = 2.0 * np.dot(direction, oc)
         c = np.dot(oc, oc) - radius * radius
@@ -321,6 +357,7 @@ class LidarGuiCalibrator:
         if delta < 0:
             return False, None
 
+        # 求根公式
         t1 = (-b - np.sqrt(delta)) / (2.0 * a)
         t2 = (-b + np.sqrt(delta)) / (2.0 * a)
         if t1 >= 0:
@@ -330,8 +367,11 @@ class LidarGuiCalibrator:
         return False, None
 
     def detect_corner_hit(self, origin, direction):
+        """根据射线检测射线指向的具体是哪一个点（返回索引）"""
         hit_idx = None
+        # 初始化最小距离（正无穷）
         min_t = float('inf')
+        # 遍历角点，使用enumerate可以同时拿到索引与点的信息
         for i, pos in enumerate(self.corner_points):
             hit, t = self.ray_sphere_intersection(origin, direction, pos, self.corner_sphere_radius)
             if hit and t is not None and t < min_t:
@@ -340,9 +380,13 @@ class LidarGuiCalibrator:
         return hit_idx
 
     def move_corner(self, mouse_origin, mouse_current):
+        """将鼠标移动了多少转换成平面上的3D位移，返回位移向量"""
+        # 获取“起始鼠标”的射线
         ray_origin, ray_dir_origin = self.get_camera_ray(mouse_origin[0], mouse_origin[1])
+        # 获取“当前鼠标”的射线（相机位置不变，不需要重复获取）
         _, ray_dir_current = self.get_camera_ray(mouse_current[0], mouse_current[1])
 
+        # 定义拖拽平面（获取点和法向量）
         plane_point = self.plane.center
         normal = self.plane.R[:, 2]
 
@@ -351,20 +395,27 @@ class LidarGuiCalibrator:
         if start_hit is None or current_hit is None:
             return None
 
+        # 最终返回位移（位移向量）
         return current_hit - start_hit
 
     def update_corner_spheres(self):
+        """刷新显示，重新绘制所有角点球"""
+        # 删掉旧球 → 创建新球 → 重新显示
         for i, pos in enumerate(self.corner_points):
             name = f"corner_{i}"
+            # 删除旧球
             self.scene.scene.remove_geometry(name)
-
+            # 重新创建球并更新位置
             sphere = o3d.geometry.TriangleMesh.create_sphere(radius=self.corner_sphere_radius)
             sphere.translate(pos)
 
+            # 正在拖拽：渲染成绿色
             if i == self.selected_corner_idx and self.dragging_corner:
                 sphere.paint_uniform_color([0, 1, 0])
+            # 选中了但没拖：渲染成黄色
             elif i == self.selected_corner_idx:
                 sphere.paint_uniform_color([1, 1, 0])
+            # 普通状态：蓝色
             else:
                 sphere.paint_uniform_color([0, 0, 1])
 
@@ -458,26 +509,33 @@ class LidarGuiCalibrator:
         self.grid_origin = p0
         self.grid_x_axis = x_axis
         self.grid_y_axis = y_axis
-
     def on_key(self, event):
+
         if event.type == gui.KeyEvent.Type.DOWN:
 
-            # S 导出（Open3D KeyEvent 无 is_ctrl_down
-            # 具体 modifier 支持依赖 Open3D 版本，此处先保持兼容）
+            # 按下 S 键导出
             if event.key == gui.KeyName.S:
 
                 print("⌨️ S detected → 导出网格点")
 
-                import time
-                filename = f"../output/lidar_corner_{int(time.time())}.csv"
+                # 生成当前时间字符串
+                current_time = datetime.now().strftime("%Y-%m-%d-%H-%M")
 
+                # 文件名
+                filename = f"../output/lidar_corner_{current_time}.csv"
+
+                # 导出
                 self.export_grid_intersections(filename)
+
+                print(f"✅ 已导出: {filename}")
 
                 return gui.Widget.EventCallbackResult.HANDLED
 
         return gui.Widget.EventCallbackResult.IGNORED
 
     def export_grid_intersections(self, filename="grid_points.csv"):
+        """网格求交，按照固定顺序导出成csv文件"""
+        # 检查网格是否存在 hasattr():“has attribute对象有没有这个属性”
         if not hasattr(self, "x_lines"):
             print("❌ 网格还没生成")
             return
@@ -488,17 +546,25 @@ class LidarGuiCalibrator:
         x_axis = self.grid_x_axis
         y_axis = self.grid_y_axis
 
+        # 依旧获取平面法向量
         normal = self.plane.R[:, 2]
 
-        for x in self.x_lines:
-            for y in self.y_lines:
+        # ✅ 行优先：从 p0 开始，一行一行扫
+        # 外层循环：行，内层循环：列
+        for row_idx, y in enumerate(self.y_lines):
+            for col_idx, x in enumerate(self.x_lines):
+
+                # 将局部坐标 转换成 世界坐标
                 pt = p0 + x * x_axis + y * y_axis
-                pt = pt + self.offset * normal
+                # pt = pt + self.offset * normal  #这里不能再有偏置了，需要输出到文件
+
                 points.append(pt)
+
+                # 调试输出
+                print(f"输出：row={row_idx}, col={col_idx}, pt={pt}")
 
         points = np.array(points)
 
-        import csv
         with open(filename, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["x", "y", "z"])
@@ -506,7 +572,7 @@ class LidarGuiCalibrator:
 
         print(f"✅ 已导出 {len(points)} 个点到 {filename}")
 
-    # ================= 主入口 =================
+    # ================= gui界面主入口 =================
     def run(self):
         app = gui.Application.instance
         app.initialize()
@@ -515,7 +581,5 @@ class LidarGuiCalibrator:
         # 初始化场景
         window, self.scene = self.init_scene()
 
-
-
-        # ===== 4️⃣ 运行 =====
+        # 运行
         app.run()

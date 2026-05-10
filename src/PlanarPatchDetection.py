@@ -87,7 +87,7 @@ def adjust_perspective(geometries):
     # 相机初始视角
     ctr.set_zoom(0.05)
     ctr.set_front([-2, 0, 0])
-    ctr.set_lookat([0, 0, 0])
+    ctr.set_lookat([0, 0, 0])       # 这里4,0,0刚好为雷达图中心
     ctr.set_up([0.5, -0.3, 5.2])
 
     print("调整好视角后按 Q")
@@ -196,7 +196,7 @@ def get_plane_view(sub_pcd):
 
 print("Load a csv point cloud, print it, and render it")
 print("Testing IO for point cloud ...")
-pcd = load_csv_to_pointcloud("../input/3.csv")
+pcd = load_csv_to_pointcloud("../input/1.csv")
 print(pcd)
 print(np.asarray(pcd.points))
 
